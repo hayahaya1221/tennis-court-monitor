@@ -1,0 +1,40 @@
+name: Tennis court availability
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '50 * * * *'
+
+concurrency:
+  group: tennis-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
+      - name: Check availability
+        run: npm run check
+        env:
+          STATE_PATH: state/seen.json
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BETWEEN_DAY_REQUESTS_MS: '1000'
+      - name: Keep deduplication state for the next run
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/seen.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update tennis availability monitoring state"
+            git push
+          fi
