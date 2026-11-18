@@ -18,7 +18,26 @@ async function onPath(page, path) {
 
 async function waitCalendar(page) {
   await onPath(page, CALENDAR_PATH);
-  await page.locator('table').first().waitFor({state:'visible',timeout:25000});
+  await page.locator('table').first().waitFor({state:'visible',timeout:45000});
+}
+
+async function captureSafePageState(page) {
+  // Report only page structure in the public Actions log. Never save page HTML,
+  // URLs with query strings, form values, cookies, or user credentials.
+  try {
+    return await page.evaluate(() => ({
+      path: location.pathname,
+      title: document.title.slice(0,100),
+      readyState: document.readyState,
+      tableCount: document.querySelectorAll('table').length,
+      visibleTableCount: [...document.querySelectorAll('table')]
+        .filter(t => !!(t.offsetWidth || t.offsetHeight || t.getClientRects().length)).length,
+      loadingIndicator: !!document.querySelector('body.Loading-indicator'),
+      mainHeading: document.querySelector('h2')?.textContent?.trim().slice(0,80) ?? null
+    }));
+  } catch(error) {
+    return {diagnosticsUnavailable: error instanceof Error ? error.name : 'unknown'};
+  }
 }
 
 async function selectFacility(page, name) {
@@ -224,5 +243,9 @@ export async function scanSite(browser,site,from,{delayMs=800}={}){
     // At least one date must have been checked to classify the run as successful.
     if(!inspected.size)throw new Error('対象施設の空きカレンダーを読み取れない');
     return {site,from,until,daysInspected:inspected.size,raw};
+  }catch(error){
+    const diagnostics=await captureSafePageState(page);
+    const message=error instanceof Error?error.message:String(error);
+    throw new Error(`${message}\nPage diagnostics: ${JSON.stringify(diagnostics)}`);
   }finally{await page.close();}
 }
