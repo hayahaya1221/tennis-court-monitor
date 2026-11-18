@@ -1,0 +1,33 @@
+name: Compare Sumida URLs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  connectivity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Resolve Sumida host
+        run: |
+          timeout 10s getent ahostsv4 yoyaku03.city.sumida.lg.jp | head -n 3 || true
+
+      - name: Compare official and direct URL responses
+        run: |
+          set +e
+          for target_url in \
+            'https://yoyaku03.city.sumida.lg.jp/user/' \
+            'https://yoyaku03.city.sumida.lg.jp/user/Home'; do
+            echo "Target: $target_url"
+            curl --silent --show-error --retry 0 \
+              --connect-timeout 8 --max-time 25 \
+              --output /dev/null \
+              --write-out 'HTTP code: %{http_code}\nRemote IP: %{remote_ip}\nDNS: %{time_namelookup}s\nConnect: %{time_connect}s\nTLS: %{time_appconnect}s\nFirst byte: %{time_starttransfer}s\n' \
+              "$target_url"
+            status=$?
+            echo "curl exit code: $status"
+          done
+          exit 0
