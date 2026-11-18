@@ -3,6 +3,7 @@ import {dirname,resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {bunkyoNotifications,sumidaNotifications,novelSlots,slotKey,formatNotice,japanNow} from './slots.mjs';
 import {scanSite} from './sites.mjs';
+import {splitNoticeBatches,sendLinePush} from './notify.mjs';
 
 const statePath=resolve(process.env.STATE_PATH || './state/seen.json');
 const checked=japanNow();
@@ -12,21 +13,15 @@ const currentState=await readFile(statePath,'utf8').then(JSON.parse).catch(e=>{
 });
 currentState.sites ||= {};
 
-const botToken=process.env.TELEGRAM_BOT_TOKEN;
-const chatId=process.env.TELEGRAM_CHAT_ID;
-if(Boolean(botToken)!==Boolean(chatId))throw new Error('TelegramのトークンとチャットIDは両方指定してください');
-const telegramConfigured=Boolean(botToken&&chatId);
-const transport=telegramConfigured?'telegram':'stdout-only';
+const lineToken=process.env.LINE_CHANNEL_ACCESS_TOKEN;
+const lineUserId=process.env.LINE_USER_ID;
+if(Boolean(lineToken)!==Boolean(lineUserId))throw new Error('LINE_CHANNEL_ACCESS_TOKEN と LINE_USER_ID は両方指定してください');
+const lineConfigured=Boolean(lineToken&&lineUserId);
+const transport=lineConfigured?'line':'stdout-only';
 
 async function notify(message){
-  if(!telegramConfigured){console.log(message);return false;}
-  const response=await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`,{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({chat_id:chatId,text:message,disable_web_page_preview:true}),
-    signal:AbortSignal.timeout(15000),
-  });
-  if(!response.ok)throw new Error(`Telegramの通知に失敗（HTTP ${response.status}）`);
-  return true;
+  if(!lineConfigured){console.log(message);return false;}
+  return sendLinePush({token:lineToken,userId:lineUserId,text:message});
 }
 
 let browser;
@@ -45,15 +40,8 @@ try{
       let delivered=true;
       if(newMatches.length){
         const notices=newMatches.map(slot=>formatNotice(slot,checked.time));
-        // Telegram's sendMessage payload is limited to 4096 characters.
-        const batches=[];
-        let batch='';
-        for(const notice of notices){
-          if(batch && batch.length+notice.length+2>3500){batches.push(batch);batch='';}
-          batch+=`${batch?'\n\n':''}${notice}`;
-        }
-        if(batch)batches.push(batch);
-        for(const report of batches){
+        // LINE text messages are limited to 5,000 characters.
+        for(const report of splitNoticeBatches(notices)){
           const sent=await notify(report);
           delivered=delivered&&sent;
         }
