@@ -134,9 +134,39 @@ function normalizeSumidaCourt(s) {
   return x ? `${x[1]}面` : null;
 }
 
-async function timeAvailability(page, site, date) {
+async function timeAvailability(page, site, date, expectedCourts) {
   await onPath(page,TIME_PATH);
-  await page.locator('.events-group').first().waitFor({state:'attached',timeout:25000});
+  // Navigation at 'commit' may finish before the time grid has populated.
+  // An attached .events-group alone is insufficient: an empty/incomplete grid
+  // previously caused false "F category missing" errors while readyState=loading.
+  await page.locator('.events-group').first().waitFor({state:'visible',timeout:45000});
+  const expectedNames=[...new Set(expectedCourts.map(s=>s.normalize('NFKC').replace(/[\s()（）]/g,'')))];
+  try {
+    await page.waitForFunction(({site,expectedNames})=>{
+      if(document.readyState==='loading')return false;
+      const normalize=s=>s.normalize('NFKC').replace(/[\s()（）]/g,'');
+      const rows=new Map([...document.querySelectorAll('.events-group')].map(row=>{
+        const name=row.querySelector('.room-name')?.textContent.trim()
+          ?? row.textContent.split('\n')[0].trim();
+        return [normalize(name),row];
+      }));
+      return expectedNames.length>0 && expectedNames.every(name=>{
+        const row=rows.get(name);
+        if(!row)return false;
+        const cells=[...row.querySelectorAll('.btn-group-toggle')];
+        if(site==='sumida')return cells.length===13;
+        return cells.some(cell=>[...(cell.querySelector('label')?.querySelectorAll('span')??[])]
+          .some(span=>!span.classList.contains('sr-only') && span.textContent.trim().normalize('NFKC')==='F'));
+      });
+    },{site,expectedNames},{timeout:45000,polling:250});
+  } catch(error) {
+    // Include only public court names and time-grid structure, not HTML/forms.
+    const details=await page.evaluate(()=>[...document.querySelectorAll('.events-group')].slice(0,8).map(row=>({
+      court:row.querySelector('.room-name')?.textContent.trim().slice(0,40)??null,
+      timeCells:row.querySelectorAll('.btn-group-toggle').length
+    }))).catch(()=>[]);
+    throw new Error(`時間帯別画面の表示待機がタイムアウト: ${date} expected=${JSON.stringify(expectedNames)} grid=${JSON.stringify(details)}`);
+  }
   await ensureNoChallenge(page);
   const rows=await page.evaluate((site)=>{
     return [...document.querySelectorAll('.events-group')].map(row=>{
@@ -153,7 +183,11 @@ async function timeAvailability(page, site, date) {
     });
   },site);
   const output=[];
+  const selectedNames=new Set(expectedNames);
   for(const r of rows){
+    // Time views may contain rows other than the checked calendar selection.
+    // Only interpret the courts explicitly selected for this date.
+    if(!selectedNames.has(r.name.normalize('NFKC').replace(/[\s()（）]/g,'')))continue;
     if(site==='bunkyo'){
       if(!/^(第[１-５1-5]コート)(?:平日|土日祝)/.test(r.name)) continue;
       const f=r.cells.find(x=>x.letter==='Ｆ'||x.letter==='F');
@@ -179,7 +213,7 @@ async function selectAndInspectDate(page,site,candidates,date,delayMs){
     await label.click();
   }
   await clickButton(page,NEXT_BUTTON);
-  const results=await timeAvailability(page,site,date);
+  const results=await timeAvailability(page,site,date,selected.map(c=>c.court));
   await clickButton(page,BACK_BUTTON);
   await waitCalendar(page);
   // The booking UI retains selections after returning to the calendar.
