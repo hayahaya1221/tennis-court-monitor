@@ -4,6 +4,9 @@ const NEXT_BUTTON = '次へ進む';
 const BACK_BUTTON = '前に戻る';
 const CALENDAR_PATH = '/AvailabilityCheckApplySelectDays';
 const TIME_PATH = '/AvailabilityCheckApplySelectTime';
+const MAX_SELECTED_CELLS = 10;
+const SELECTION_SETTLE_MS = 3000;
+const NAVIGATION_TIMEOUT_MS = 60000;
 
 async function clickButton(page, label) {
   // The booking UI keeps buttons for inactive tabs in the DOM. On the Bunkyo
@@ -13,12 +16,15 @@ async function clickButton(page, label) {
 }
 
 async function onPath(page, path) {
-  await page.waitForURL(url => url.pathname.endsWith(path), {timeout: 25000});
+  await page.waitForURL(url => url.pathname.endsWith(path), {
+    timeout: NAVIGATION_TIMEOUT_MS,
+    waitUntil: 'commit'
+  });
 }
 
 async function waitCalendar(page) {
   await onPath(page, CALENDAR_PATH);
-  await page.locator('table').first().waitFor({state:'visible',timeout:45000});
+  await page.locator('table').first().waitFor({state:'visible',timeout:NAVIGATION_TIMEOUT_MS});
 }
 
 async function captureSafePageState(page) {
@@ -120,8 +126,12 @@ function normalizeSumidaCourt(s) {
 }
 
 async function timeAvailability(page, site, date) {
-  await onPath(page,TIME_PATH);
-  await page.locator('.events-group').first().waitFor({state:'attached',timeout:25000});
+  // The time grid can be slow even after the URL changes. Do not wait for
+  // unrelated page resources to finish loading before checking its own UI.
+  await page.waitForURL(url=>url.pathname.endsWith(TIME_PATH),{
+    timeout:NAVIGATION_TIMEOUT_MS,waitUntil:'commit'
+  });
+  await page.locator('.events-group').first().waitFor({state:'visible',timeout:NAVIGATION_TIMEOUT_MS});
   await ensureNoChallenge(page);
   const rows=await page.evaluate((site)=>{
     return [...document.querySelectorAll('.events-group')].map(row=>{
@@ -158,24 +168,69 @@ async function timeAvailability(page, site, date) {
 
 async function selectAndInspectDate(page,site,candidates,date,delayMs){
   const selected=candidates.filter(c=>c.date===date);
-  for(const c of selected){
-    const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
-      .locator('td').nth(c.cellIndex).locator('label');
-    await label.click();
+  const results=[];
+  // The reservation system rejects more than ten selected date/court cells.
+  // Keep the working, date-based selection flow, splitting only when needed.
+  for(let offset=0;offset<selected.length;offset+=MAX_SELECTED_CELLS){
+    const batch=selected.slice(offset,offset+MAX_SELECTED_CELLS);
+    for(const c of batch){
+      const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
+        .locator('td').nth(c.cellIndex).locator('label');
+      await label.click();
+    }
+    // Date selection is reflected in the DOM immediately, but the site's
+    // navigation handler can still be processing it. Allow it to settle.
+    await page.waitForTimeout(SELECTION_SETTLE_MS);
+    const ready=await page.evaluate(items=>items.every(c=>{
+      const row=document.querySelectorAll('table')[c.tableIndex]?.querySelectorAll('tr')[c.rowIndex];
+      const label=row?.querySelectorAll('td')[c.cellIndex]?.querySelector('label');
+      return !!label?.classList.contains('active') && !!label.querySelector('input[type="checkbox"]')?.checked;
+    }),batch);
+    if(!ready)throw new Error(`日付・コートの選択が確定していません: ${date} (${batch.length}件)`);
+
+    await clickButton(page,NEXT_BUTTON);
+    try{
+      await page.waitForURL(url=>url.pathname.endsWith(TIME_PATH),{
+        timeout:NAVIGATION_TIMEOUT_MS,waitUntil:'commit'
+      });
+    }catch(error){
+      const currentPath=new URL(page.url()).pathname;
+      if(currentPath.endsWith(CALENDAR_PATH)){
+        // Retry only if the same date-selection page still remains after a
+        // full 60-second wait. Never duplicate a completed navigation.
+        await page.waitForTimeout(3000);
+        await clickButton(page,NEXT_BUTTON);
+        try{
+          await page.waitForURL(url=>url.pathname.endsWith(TIME_PATH),{
+            timeout:NAVIGATION_TIMEOUT_MS,waitUntil:'commit'
+          });
+        }catch(retryError){
+          const diagnostic=await page.evaluate(()=>({
+            path:location.pathname,
+            loading:document.body.classList.contains('Loading-indicator'),
+            activeSelections:document.querySelectorAll('table label.active').length,
+            checkedSelections:document.querySelectorAll('table label input[type="checkbox"]:checked').length,
+            alerts:[...document.querySelectorAll('[role="alert"],.alert-danger')]
+              .slice(0,3).map(el=>el.textContent.trim().slice(0,150))
+          })).catch(()=>({path:new URL(page.url()).pathname,diagnosticsUnavailable:true}));
+          throw new Error(`時間帯画面への遷移に失敗: ${date} (${batch.length}件), 60秒待機後に1回再試行済み, 状態=${JSON.stringify(diagnostic)}, 原因=${retryError.message}`);
+        }
+      }else if(!currentPath.endsWith(TIME_PATH)){
+        throw new Error(`想定外の画面へ遷移しました: ${date}, 現在 ${currentPath}`);
+      }
+    }
+    results.push(...await timeAvailability(page,site,date));
+    await clickButton(page,BACK_BUTTON);
+    await waitCalendar(page);
+    // Preserve the successful version's deselection behavior after returning.
+    for(const c of batch){
+      const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
+        .locator('td').nth(c.cellIndex).locator('label');
+      const active=await label.getAttribute('class');
+      if((active??'').split(/\s+/).includes('active'))await label.click();
+    }
+    if(delayMs)await page.waitForTimeout(delayMs);
   }
-  await clickButton(page,NEXT_BUTTON);
-  const results=await timeAvailability(page,site,date);
-  await clickButton(page,BACK_BUTTON);
-  await waitCalendar(page);
-  // The booking UI retains selections after returning to the calendar.
-  // Clear them before the next date, otherwise courts/dates get mixed.
-  for(const c of selected){
-    const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
-      .locator('td').nth(c.cellIndex).locator('label');
-    const active=await label.getAttribute('class');
-    if((active??'').split(/\s+/).includes('active'))await label.click();
-  }
-  if(delayMs) await page.waitForTimeout(delayMs);
   return results;
 }
 
@@ -193,7 +248,7 @@ async function displayRange(page,site,startDate){
     const m=startDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
     const expected=`${m[1]}/${Number(m[2])}/${Number(m[3])}`;
     return tables.some(t=>t.innerText.startsWith(expected));
-  },startDate,{timeout:30000});
+  },startDate,{timeout:NAVIGATION_TIMEOUT_MS});
   await ensureNoChallenge(page);
 }
 
