@@ -15,6 +15,17 @@ async function clickButton(page, label) {
   await page.locator('button:visible').filter({hasText: label}).first().click();
 }
 
+async function visibleModalDetails(page){
+  // Read only the public validation message, not form fields or page HTML.
+  return page.evaluate(()=>[...document.querySelectorAll('[role="dialog"][aria-modal="true"]')]
+    .filter(el=>!!(el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+    .slice(0,3).map(el=>({
+      title:el.querySelector('.modal-title')?.textContent?.trim().slice(0,100)??'',
+      message:(el.querySelector('.modal-body')?.textContent??el.textContent??'')
+        .trim().slice(0,400)
+    }))).catch(()=>[]);
+}
+
 async function onPath(page, path) {
   await page.waitForURL(url => url.pathname.endsWith(path), {
     timeout: NAVIGATION_TIMEOUT_MS,
@@ -196,10 +207,25 @@ async function selectAndInspectDate(page,site,candidates,date,delayMs){
     }catch(error){
       const currentPath=new URL(page.url()).pathname;
       if(currentPath.endsWith(CALENDAR_PATH)){
+        // Validation dialogs block the underlying Next button. Retrying a
+        // covered button only produces a click timeout, hiding the real cause.
+        const modals=await visibleModalDetails(page);
+        if(modals.length){
+          throw new Error(`予約サイトが画面遷移を中断するダイアログを表示: ${date} (${batch.length}件), ${JSON.stringify(modals)}`);
+        }
         // Retry only if the same date-selection page still remains after a
         // full 60-second wait. Never duplicate a completed navigation.
         await page.waitForTimeout(3000);
-        await clickButton(page,NEXT_BUTTON);
+        const beforeRetryModals=await visibleModalDetails(page);
+        if(beforeRetryModals.length){
+          throw new Error(`再試行前にダイアログが表示されました: ${date}, ${JSON.stringify(beforeRetryModals)}`);
+        }
+        try{
+          await clickButton(page,NEXT_BUTTON);
+        }catch(clickError){
+          const retryModals=await visibleModalDetails(page);
+          throw new Error(`再試行ボタンを押せません: ${date}, modal=${JSON.stringify(retryModals)}, 原因=${clickError.message}`);
+        }
         try{
           await page.waitForURL(url=>url.pathname.endsWith(TIME_PATH),{
             timeout:NAVIGATION_TIMEOUT_MS,waitUntil:'commit'
@@ -213,7 +239,8 @@ async function selectAndInspectDate(page,site,candidates,date,delayMs){
             alerts:[...document.querySelectorAll('[role="alert"],.alert-danger')]
               .slice(0,3).map(el=>el.textContent.trim().slice(0,150))
           })).catch(()=>({path:new URL(page.url()).pathname,diagnosticsUnavailable:true}));
-          throw new Error(`時間帯画面への遷移に失敗: ${date} (${batch.length}件), 60秒待機後に1回再試行済み, 状態=${JSON.stringify(diagnostic)}, 原因=${retryError.message}`);
+          const retryModals=await visibleModalDetails(page);
+          throw new Error(`時間帯画面への遷移に失敗: ${date} (${batch.length}件), 60秒待機後に1回再試行済み, 状態=${JSON.stringify(diagnostic)}, modal=${JSON.stringify(retryModals)}, 原因=${retryError.message}`);
         }
       }else if(!currentPath.endsWith(TIME_PATH)){
         throw new Error(`想定外の画面へ遷移しました: ${date}, 現在 ${currentPath}`);
