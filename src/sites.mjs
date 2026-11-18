@@ -13,7 +13,19 @@ async function clickButton(page, label) {
 }
 
 async function onPath(page, path) {
-  await page.waitForURL(url => url.pathname.endsWith(path), {timeout: 25000});
+  // This JavaScript-heavy site sometimes keeps subresources loading long after
+  // the target URL is reached. Wait for the navigation response, then let the
+  // destination's own UI selectors establish that the screen is ready.
+  try {
+    await page.waitForURL(url => url.pathname.endsWith(path), {
+      timeout: 45000,
+      waitUntil: 'commit'
+    });
+  } catch (error) {
+    const currentPath=new URL(page.url()).pathname;
+    const reason=error instanceof Error?error.message:String(error);
+    throw new Error(`画面遷移先 ${path} を確認できません（現在 ${currentPath}）: ${reason}`);
+  }
 }
 
 async function waitCalendar(page) {
@@ -36,7 +48,10 @@ async function captureSafePageState(page) {
       mainHeading: document.querySelector('h2')?.textContent?.trim().slice(0,80) ?? null
     }));
   } catch(error) {
-    return {diagnosticsUnavailable: error instanceof Error ? error.name : 'unknown'};
+    return {
+      diagnosticsUnavailable: error instanceof Error ? error.name : 'unknown',
+      path: new URL(page.url()).pathname
+    };
   }
 }
 
@@ -208,13 +223,13 @@ async function enterCalendar(page,site){
     await page.getByRole('tab',{name:'施設名から探す'}).click();
     await page.locator('#divSearch').getByRole('textbox').first().fill('竹早');
     await clickButton(page,'検索');
-    await page.waitForURL(url=>url.pathname.endsWith('/AvailabilityCheckApplySelectFacility'));
+    await onPath(page,'/AvailabilityCheckApplySelectFacility');
     await selectFacility(page,'竹早テニスコート（土日祝）');
     await selectFacility(page,'竹早テニスコート（平日）');
   }else{
     await clickButton(page,'屋外スポーツ施設');
     // "公園運動場" is a checkbox on the facility-selection screen, not a button.
-    await page.waitForURL(url=>url.pathname.endsWith('/AvailabilityCheckApplySelectFacility'),{timeout:45000});
+    await onPath(page,'/AvailabilityCheckApplySelectFacility');
     await selectFacility(page,'公園運動場');
   }
   await clickButton(page,NEXT_BUTTON);
@@ -227,15 +242,18 @@ export async function scanSite(browser,site,from,{delayMs=800}={}){
   const page=await browser.newPage({locale:'ja-JP',timeZoneId:'Asia/Tokyo'});
   const raw=[];
   const inspected=new Set();
+  let stage='enterCalendar';
   try{
     await enterCalendar(page,site);
     const starts=site==='bunkyo'?[from,addDays(from,30),addDays(from,60)]:[from];
     for(const start of starts){
       if(start>until)continue;
+      stage=`displayRange(${start})`;
       await displayRange(page,site,start);
       const result=await dayCandidates(page,site,until,from);
       for(const day of result.inspected)inspected.add(day);
       for(const date of [...new Set(result.candidates.map(x=>x.date))].sort()){
+        stage=`inspectDate(${date})`;
         raw.push(...await selectAndInspectDate(page,site,result.candidates,date,delayMs));
       }
     }
@@ -246,6 +264,6 @@ export async function scanSite(browser,site,from,{delayMs=800}={}){
   }catch(error){
     const diagnostics=await captureSafePageState(page);
     const message=error instanceof Error?error.message:String(error);
-    throw new Error(`${message}\nPage diagnostics: ${JSON.stringify(diagnostics)}`);
+    throw new Error(`Stage: ${stage}\n${message}\nPage diagnostics: ${JSON.stringify(diagnostics)}`);
   }finally{await page.close();}
 }
