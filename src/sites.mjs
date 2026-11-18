@@ -6,8 +6,10 @@ const CALENDAR_PATH = '/AvailabilityCheckApplySelectDays';
 const TIME_PATH = '/AvailabilityCheckApplySelectTime';
 
 async function clickButton(page, label) {
-  // Some versions mark their visible navigation buttons aria-hidden="true".
-  await page.locator('button').filter({hasText: label}).first().click();
+  // The booking UI keeps buttons for inactive tabs in the DOM. On the Bunkyo
+  // home page, five buttons read "検索", but only one is visible. Some visible
+  // navigation buttons also have aria-hidden="true", so don't use getByRole.
+  await page.locator('button:visible').filter({hasText: label}).first().click();
 }
 
 async function onPath(page, path) {
@@ -168,18 +170,24 @@ async function displayRange(page,site,startDate){
 }
 
 async function enterCalendar(page,site){
-  await page.goto(MATCH_URLS[site],{waitUntil:'domcontentloaded',timeout:30000});
+  // Sumida can respond slowly from hosted runners. Wait for the HTTP response
+  // first, then for the JavaScript UI to render, rather than demanding the
+  // full DOMContentLoaded event within one short navigation timeout.
+  await page.goto(MATCH_URLS[site],{waitUntil:'commit',timeout:75000});
+  await page.locator('#divSearch').waitFor({state:'visible',timeout:45000});
   await ensureNoChallenge(page);
   if(site==='bunkyo'){
-    await page.getByText('施設名から探す',{exact:true}).first().click();
-    await page.getByRole('textbox').first().fill('竹早');
+    await page.getByRole('tab',{name:'施設名から探す'}).click();
+    await page.locator('#divSearch').getByRole('textbox').first().fill('竹早');
     await clickButton(page,'検索');
     await page.waitForURL(url=>url.pathname.endsWith('/AvailabilityCheckApplySelectFacility'));
     await page.getByRole('checkbox',{name:'竹早テニスコート（土日祝）'}).check();
     await page.getByRole('checkbox',{name:'竹早テニスコート（平日）'}).check();
   }else{
     await clickButton(page,'屋外スポーツ施設');
-    await clickButton(page,'公園運動場');
+    // "公園運動場" is a checkbox on the facility-selection screen, not a button.
+    await page.waitForURL(url=>url.pathname.endsWith('/AvailabilityCheckApplySelectFacility'),{timeout:45000});
+    await page.getByRole('checkbox',{name:'公園運動場',exact:true}).check();
   }
   await clickButton(page,NEXT_BUTTON);
   await waitCalendar(page);
