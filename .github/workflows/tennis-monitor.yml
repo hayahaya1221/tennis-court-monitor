@@ -1,8 +1,6 @@
 name: Tennis court availability
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '50 * * * *'
 
 concurrency:
   group: tennis-monitor
