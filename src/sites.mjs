@@ -13,19 +13,7 @@ async function clickButton(page, label) {
 }
 
 async function onPath(page, path) {
-  // This JavaScript-heavy site sometimes keeps subresources loading long after
-  // the target URL is reached. Wait for the navigation response, then let the
-  // destination's own UI selectors establish that the screen is ready.
-  try {
-    await page.waitForURL(url => url.pathname.endsWith(path), {
-      timeout: 45000,
-      waitUntil: 'commit'
-    });
-  } catch (error) {
-    const currentPath=new URL(page.url()).pathname;
-    const reason=error instanceof Error?error.message:String(error);
-    throw new Error(`画面遷移先 ${path} を確認できません（現在 ${currentPath}）: ${reason}`);
-  }
+  await page.waitForURL(url => url.pathname.endsWith(path), {timeout: 25000});
 }
 
 async function waitCalendar(page) {
@@ -48,10 +36,7 @@ async function captureSafePageState(page) {
       mainHeading: document.querySelector('h2')?.textContent?.trim().slice(0,80) ?? null
     }));
   } catch(error) {
-    return {
-      diagnosticsUnavailable: error instanceof Error ? error.name : 'unknown',
-      path: new URL(page.url()).pathname
-    };
+    return {diagnosticsUnavailable: error instanceof Error ? error.name : 'unknown'};
   }
 }
 
@@ -134,39 +119,9 @@ function normalizeSumidaCourt(s) {
   return x ? `${x[1]}面` : null;
 }
 
-async function timeAvailability(page, site, date, expectedCourts) {
+async function timeAvailability(page, site, date) {
   await onPath(page,TIME_PATH);
-  // Navigation at 'commit' may finish before the time grid has populated.
-  // An attached .events-group alone is insufficient: an empty/incomplete grid
-  // previously caused false "F category missing" errors while readyState=loading.
-  await page.locator('.events-group').first().waitFor({state:'visible',timeout:45000});
-  const expectedNames=[...new Set(expectedCourts.map(s=>s.normalize('NFKC').replace(/[\s()（）]/g,'')))];
-  try {
-    await page.waitForFunction(({site,expectedNames})=>{
-      if(document.readyState==='loading')return false;
-      const normalize=s=>s.normalize('NFKC').replace(/[\s()（）]/g,'');
-      const rows=new Map([...document.querySelectorAll('.events-group')].map(row=>{
-        const name=row.querySelector('.room-name')?.textContent.trim()
-          ?? row.textContent.split('\n')[0].trim();
-        return [normalize(name),row];
-      }));
-      return expectedNames.length>0 && expectedNames.every(name=>{
-        const row=rows.get(name);
-        if(!row)return false;
-        const cells=[...row.querySelectorAll('.btn-group-toggle')];
-        if(site==='sumida')return cells.length===13;
-        return cells.some(cell=>[...(cell.querySelector('label')?.querySelectorAll('span')??[])]
-          .some(span=>!span.classList.contains('sr-only') && span.textContent.trim().normalize('NFKC')==='F'));
-      });
-    },{site,expectedNames},{timeout:45000,polling:250});
-  } catch(error) {
-    // Include only public court names and time-grid structure, not HTML/forms.
-    const details=await page.evaluate(()=>[...document.querySelectorAll('.events-group')].slice(0,8).map(row=>({
-      court:row.querySelector('.room-name')?.textContent.trim().slice(0,40)??null,
-      timeCells:row.querySelectorAll('.btn-group-toggle').length
-    }))).catch(()=>[]);
-    throw new Error(`時間帯別画面の表示待機がタイムアウト: ${date} expected=${JSON.stringify(expectedNames)} grid=${JSON.stringify(details)}`);
-  }
+  await page.locator('.events-group').first().waitFor({state:'attached',timeout:25000});
   await ensureNoChallenge(page);
   const rows=await page.evaluate((site)=>{
     return [...document.querySelectorAll('.events-group')].map(row=>{
@@ -183,11 +138,7 @@ async function timeAvailability(page, site, date, expectedCourts) {
     });
   },site);
   const output=[];
-  const selectedNames=new Set(expectedNames);
   for(const r of rows){
-    // Time views may contain rows other than the checked calendar selection.
-    // Only interpret the courts explicitly selected for this date.
-    if(!selectedNames.has(r.name.normalize('NFKC').replace(/[\s()（）]/g,'')))continue;
     if(site==='bunkyo'){
       if(!/^(第[１-５1-5]コート)(?:平日|土日祝)/.test(r.name)) continue;
       const f=r.cells.find(x=>x.letter==='Ｆ'||x.letter==='F');
@@ -205,83 +156,25 @@ async function timeAvailability(page, site, date, expectedCourts) {
   return output;
 }
 
-function calendarLabel(page,c){
-  return page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
-    .locator('td').nth(c.cellIndex).locator('label');
-}
-
-async function calendarSelectionState(page){
-  // The site's Bootstrap label.active and input.checked may disagree after
-  // returning from the time screen, so always inspect both independently.
-  return page.evaluate(()=>{
-    const labels=[...document.querySelectorAll('table label')]
-      .filter(label=>label.querySelector('input[type="checkbox"]'));
-    return {
-      active:labels.filter(label=>label.classList.contains('active')).length,
-      checked:labels.filter(label=>label.querySelector('input[type="checkbox"]').checked).length
-    };
-  });
-}
-
-async function selectAndInspectDate(page,site,candidates,date,delayMs,{start,from,until}){
-  const requested=candidates.filter(c=>c.date===date);
-  if(!requested.length)throw new Error(`確認対象の日付が候補にありません: ${date}`);
-  await waitCalendar(page);
-  await page.locator('body.Loading-indicator').waitFor({state:'hidden',timeout:45000});
-  let selection=await calendarSelectionState(page);
-  if(selection.active || selection.checked){
-    // Clicking an active label can invert only one of the two selection states.
-    // Re-render the calendar instead of trying to repair stale UI state by clicks.
-    await displayRange(page,site,start);
-    // A display click initiates AJAX. Its old table can remain on screen briefly
-    // even when the requested date range is unchanged.
-    await page.waitForFunction(()=>{
-      const labels=[...document.querySelectorAll('table label')]
-        .filter(label=>label.querySelector('input[type="checkbox"]'));
-      return labels.length>0 && labels.every(label=>
-        !label.classList.contains('active') && !label.querySelector('input[type="checkbox"]').checked);
-    },null,{timeout:15000,polling:200}).catch(()=>{});
-    selection=await calendarSelectionState(page);
-  }
-  if(selection.active || selection.checked){
-    throw new Error(`前回の日付選択を解除できません: active=${selection.active}, checked=${selection.checked}`);
-  }
-
-  // Re-evaluate the current calendar after each return from the time screen.
-  // Old table/row/column indices may refer to a different cell after AJAX.
-  const requestedNames=new Set(requested.map(c=>c.court));
-  let current=(await dayCandidates(page,site,until,from)).candidates
-    .filter(c=>c.date===date && requestedNames.has(c.court));
-  if(current.length!==requestedNames.size){
-    await displayRange(page,site,start);
-    current=(await dayCandidates(page,site,until,from)).candidates
-      .filter(c=>c.date===date && requestedNames.has(c.court));
-  }
-  if(current.length!==requestedNames.size){
-    throw new Error(`日付選択画面の候補が変化しました: ${date} expected=${requestedNames.size} found=${current.length}`);
-  }
-
-  for(const c of current){
-    const label=calendarLabel(page,c);
+async function selectAndInspectDate(page,site,candidates,date,delayMs){
+  const selected=candidates.filter(c=>c.date===date);
+  for(const c of selected){
+    const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
+      .locator('td').nth(c.cellIndex).locator('label');
     await label.click();
-    await page.waitForFunction(({tableIndex,rowIndex,cellIndex})=>{
-      const row=document.querySelectorAll('table')[tableIndex]?.querySelectorAll('tr')[rowIndex];
-      const cell=row?.querySelectorAll('td')[cellIndex];
-      const label=cell?.querySelector('label.active');
-      return !!label?.querySelector('input[type="checkbox"]:checked');
-    },c,{timeout:7000,polling:100});
   }
-  // A click can return before the site's selection state has changed. Do not
-  // proceed to a page that silently stays on the calendar with zero selection.
-  selection=await calendarSelectionState(page);
-  if(selection.active!==current.length || selection.checked!==current.length){
-    throw new Error(`日付の選択数が一致しません: ${date} expected=${current.length} active=${selection.active} checked=${selection.checked}`);
-  }
-
   await clickButton(page,NEXT_BUTTON);
-  const results=await timeAvailability(page,site,date,current.map(c=>c.court));
+  const results=await timeAvailability(page,site,date);
   await clickButton(page,BACK_BUTTON);
   await waitCalendar(page);
+  // The booking UI retains selections after returning to the calendar.
+  // Clear them before the next date, otherwise courts/dates get mixed.
+  for(const c of selected){
+    const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
+      .locator('td').nth(c.cellIndex).locator('label');
+    const active=await label.getAttribute('class');
+    if((active??'').split(/\s+/).includes('active'))await label.click();
+  }
   if(delayMs) await page.waitForTimeout(delayMs);
   return results;
 }
@@ -301,7 +194,6 @@ async function displayRange(page,site,startDate){
     const expected=`${m[1]}/${Number(m[2])}/${Number(m[3])}`;
     return tables.some(t=>t.innerText.startsWith(expected));
   },startDate,{timeout:30000});
-  await page.locator('body.Loading-indicator').waitFor({state:'hidden',timeout:45000});
   await ensureNoChallenge(page);
 }
 
@@ -316,13 +208,13 @@ async function enterCalendar(page,site){
     await page.getByRole('tab',{name:'施設名から探す'}).click();
     await page.locator('#divSearch').getByRole('textbox').first().fill('竹早');
     await clickButton(page,'検索');
-    await onPath(page,'/AvailabilityCheckApplySelectFacility');
+    await page.waitForURL(url=>url.pathname.endsWith('/AvailabilityCheckApplySelectFacility'));
     await selectFacility(page,'竹早テニスコート（土日祝）');
     await selectFacility(page,'竹早テニスコート（平日）');
   }else{
     await clickButton(page,'屋外スポーツ施設');
     // "公園運動場" is a checkbox on the facility-selection screen, not a button.
-    await onPath(page,'/AvailabilityCheckApplySelectFacility');
+    await page.waitForURL(url=>url.pathname.endsWith('/AvailabilityCheckApplySelectFacility'),{timeout:45000});
     await selectFacility(page,'公園運動場');
   }
   await clickButton(page,NEXT_BUTTON);
@@ -335,19 +227,16 @@ export async function scanSite(browser,site,from,{delayMs=800}={}){
   const page=await browser.newPage({locale:'ja-JP',timeZoneId:'Asia/Tokyo'});
   const raw=[];
   const inspected=new Set();
-  let stage='enterCalendar';
   try{
     await enterCalendar(page,site);
     const starts=site==='bunkyo'?[from,addDays(from,30),addDays(from,60)]:[from];
     for(const start of starts){
       if(start>until)continue;
-      stage=`displayRange(${start})`;
       await displayRange(page,site,start);
       const result=await dayCandidates(page,site,until,from);
       for(const day of result.inspected)inspected.add(day);
       for(const date of [...new Set(result.candidates.map(x=>x.date))].sort()){
-        stage=`inspectDate(${date})`;
-        raw.push(...await selectAndInspectDate(page,site,result.candidates,date,delayMs,{start,from,until}));
+        raw.push(...await selectAndInspectDate(page,site,result.candidates,date,delayMs));
       }
     }
     // A site may only expose part of its booking window. We report actual checked dates.
@@ -357,6 +246,6 @@ export async function scanSite(browser,site,from,{delayMs=800}={}){
   }catch(error){
     const diagnostics=await captureSafePageState(page);
     const message=error instanceof Error?error.message:String(error);
-    throw new Error(`Stage: ${stage}\n${message}\nPage diagnostics: ${JSON.stringify(diagnostics)}`);
+    throw new Error(`${message}\nPage diagnostics: ${JSON.stringify(diagnostics)}`);
   }finally{await page.close();}
 }
