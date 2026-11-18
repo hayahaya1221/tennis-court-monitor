@@ -21,6 +21,15 @@ async function waitCalendar(page) {
   await page.locator('table').first().waitFor({state:'visible',timeout:25000});
 }
 
+async function selectFacility(page, name) {
+  // The reservation systems render a loading mask while building the facility
+  // list. Wait for it to disappear before interacting with the visible label.
+  // Checking the underlying <input> directly is unreliable because the styled
+  // <label> intercepts pointer events on these pages.
+  await page.locator('body.Loading-indicator').waitFor({state:'hidden',timeout:45000});
+  await page.locator('label.custom-control-label').filter({hasText:name}).first().click({timeout:45000});
+}
+
 async function ensureNoChallenge(page) {
   const challenge = page.locator('iframe[src*="challenges.cloudflare.com"]');
   if (await challenge.count() && await challenge.first().isVisible()) {
@@ -181,13 +190,13 @@ async function enterCalendar(page,site){
     await page.locator('#divSearch').getByRole('textbox').first().fill('竹早');
     await clickButton(page,'検索');
     await page.waitForURL(url=>url.pathname.endsWith('/AvailabilityCheckApplySelectFacility'));
-    await page.getByRole('checkbox',{name:'竹早テニスコート（土日祝）'}).check();
-    await page.getByRole('checkbox',{name:'竹早テニスコート（平日）'}).check();
+    await selectFacility(page,'竹早テニスコート（土日祝）');
+    await selectFacility(page,'竹早テニスコート（平日）');
   }else{
     await clickButton(page,'屋外スポーツ施設');
     // "公園運動場" is a checkbox on the facility-selection screen, not a button.
     await page.waitForURL(url=>url.pathname.endsWith('/AvailabilityCheckApplySelectFacility'),{timeout:45000});
-    await page.getByRole('checkbox',{name:'公園運動場',exact:true}).check();
+    await selectFacility(page,'公園運動場');
   }
   await clickButton(page,NEXT_BUTTON);
   await waitCalendar(page);
