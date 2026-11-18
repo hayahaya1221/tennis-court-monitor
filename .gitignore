@@ -1,0 +1,11 @@
+# Local dependencies and reports must not be committed to the public repository.
+node_modules/
+playwright-report/
+test-results/
+
+# Never commit local credentials.
+.env
+.env.*
+*.secret
+
+# Local Windows monitoring output will be kept outside the repository.

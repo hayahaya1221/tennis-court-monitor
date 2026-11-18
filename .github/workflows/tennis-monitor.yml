@@ -1,6 +1,9 @@
 name: Tennis court availability
 on:
   workflow_dispatch:
+  schedule:
+    # Every hour at minute 17 (UTC); avoid the busiest minute of the hour.
+    - cron: '17 * * * *'
 
 concurrency:
   group: tennis-monitor
@@ -26,8 +29,11 @@ jobs:
           STATE_PATH: state/seen.json
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          TARGET_SITES: 'bunkyo'
+          REQUIRE_LINE: '1'
           BETWEEN_DAY_REQUESTS_MS: '1000'
       - name: Keep deduplication state for the next run
+        if: ${{ !cancelled() }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
