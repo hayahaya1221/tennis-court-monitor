@@ -205,25 +205,83 @@ async function timeAvailability(page, site, date, expectedCourts) {
   return output;
 }
 
-async function selectAndInspectDate(page,site,candidates,date,delayMs){
-  const selected=candidates.filter(c=>c.date===date);
-  for(const c of selected){
-    const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
-      .locator('td').nth(c.cellIndex).locator('label');
-    await label.click();
+function calendarLabel(page,c){
+  return page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
+    .locator('td').nth(c.cellIndex).locator('label');
+}
+
+async function calendarSelectionState(page){
+  // The site's Bootstrap label.active and input.checked may disagree after
+  // returning from the time screen, so always inspect both independently.
+  return page.evaluate(()=>{
+    const labels=[...document.querySelectorAll('table label')]
+      .filter(label=>label.querySelector('input[type="checkbox"]'));
+    return {
+      active:labels.filter(label=>label.classList.contains('active')).length,
+      checked:labels.filter(label=>label.querySelector('input[type="checkbox"]').checked).length
+    };
+  });
+}
+
+async function selectAndInspectDate(page,site,candidates,date,delayMs,{start,from,until}){
+  const requested=candidates.filter(c=>c.date===date);
+  if(!requested.length)throw new Error(`確認対象の日付が候補にありません: ${date}`);
+  await waitCalendar(page);
+  await page.locator('body.Loading-indicator').waitFor({state:'hidden',timeout:45000});
+  let selection=await calendarSelectionState(page);
+  if(selection.active || selection.checked){
+    // Clicking an active label can invert only one of the two selection states.
+    // Re-render the calendar instead of trying to repair stale UI state by clicks.
+    await displayRange(page,site,start);
+    // A display click initiates AJAX. Its old table can remain on screen briefly
+    // even when the requested date range is unchanged.
+    await page.waitForFunction(()=>{
+      const labels=[...document.querySelectorAll('table label')]
+        .filter(label=>label.querySelector('input[type="checkbox"]'));
+      return labels.length>0 && labels.every(label=>
+        !label.classList.contains('active') && !label.querySelector('input[type="checkbox"]').checked);
+    },null,{timeout:15000,polling:200}).catch(()=>{});
+    selection=await calendarSelectionState(page);
   }
+  if(selection.active || selection.checked){
+    throw new Error(`前回の日付選択を解除できません: active=${selection.active}, checked=${selection.checked}`);
+  }
+
+  // Re-evaluate the current calendar after each return from the time screen.
+  // Old table/row/column indices may refer to a different cell after AJAX.
+  const requestedNames=new Set(requested.map(c=>c.court));
+  let current=(await dayCandidates(page,site,until,from)).candidates
+    .filter(c=>c.date===date && requestedNames.has(c.court));
+  if(current.length!==requestedNames.size){
+    await displayRange(page,site,start);
+    current=(await dayCandidates(page,site,until,from)).candidates
+      .filter(c=>c.date===date && requestedNames.has(c.court));
+  }
+  if(current.length!==requestedNames.size){
+    throw new Error(`日付選択画面の候補が変化しました: ${date} expected=${requestedNames.size} found=${current.length}`);
+  }
+
+  for(const c of current){
+    const label=calendarLabel(page,c);
+    await label.click();
+    await page.waitForFunction(({tableIndex,rowIndex,cellIndex})=>{
+      const row=document.querySelectorAll('table')[tableIndex]?.querySelectorAll('tr')[rowIndex];
+      const cell=row?.querySelectorAll('td')[cellIndex];
+      const label=cell?.querySelector('label.active');
+      return !!label?.querySelector('input[type="checkbox"]:checked');
+    },c,{timeout:7000,polling:100});
+  }
+  // A click can return before the site's selection state has changed. Do not
+  // proceed to a page that silently stays on the calendar with zero selection.
+  selection=await calendarSelectionState(page);
+  if(selection.active!==current.length || selection.checked!==current.length){
+    throw new Error(`日付の選択数が一致しません: ${date} expected=${current.length} active=${selection.active} checked=${selection.checked}`);
+  }
+
   await clickButton(page,NEXT_BUTTON);
-  const results=await timeAvailability(page,site,date,selected.map(c=>c.court));
+  const results=await timeAvailability(page,site,date,current.map(c=>c.court));
   await clickButton(page,BACK_BUTTON);
   await waitCalendar(page);
-  // The booking UI retains selections after returning to the calendar.
-  // Clear them before the next date, otherwise courts/dates get mixed.
-  for(const c of selected){
-    const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
-      .locator('td').nth(c.cellIndex).locator('label');
-    const active=await label.getAttribute('class');
-    if((active??'').split(/\s+/).includes('active'))await label.click();
-  }
   if(delayMs) await page.waitForTimeout(delayMs);
   return results;
 }
@@ -243,6 +301,7 @@ async function displayRange(page,site,startDate){
     const expected=`${m[1]}/${Number(m[2])}/${Number(m[3])}`;
     return tables.some(t=>t.innerText.startsWith(expected));
   },startDate,{timeout:30000});
+  await page.locator('body.Loading-indicator').waitFor({state:'hidden',timeout:45000});
   await ensureNoChallenge(page);
 }
 
@@ -288,7 +347,7 @@ export async function scanSite(browser,site,from,{delayMs=800}={}){
       for(const day of result.inspected)inspected.add(day);
       for(const date of [...new Set(result.candidates.map(x=>x.date))].sort()){
         stage=`inspectDate(${date})`;
-        raw.push(...await selectAndInspectDate(page,site,result.candidates,date,delayMs));
+        raw.push(...await selectAndInspectDate(page,site,result.candidates,date,delayMs,{start,from,until}));
       }
     }
     // A site may only expose part of its booking window. We report actual checked dates.
