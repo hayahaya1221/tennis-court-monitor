@@ -17,8 +17,9 @@ on:
       - '.github/workflows/monitor-validation.yml'
 
 permissions:
-  contents: read
+  contents: write
   issues: write
+  pull-requests: write
 
 concurrency:
   group: tennis-monitor-validation-${{ github.ref }}
@@ -67,6 +68,42 @@ jobs:
           else
             gh issue comment "$existing" --body "$body"
           fi
+      - name: Propose bounded calendar-timeout repair
+        if: steps.smoke.outcome == 'failure' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Only repair this one diagnosed failure. Never rewrite arbitrary code.
+          if ! grep -q "waiting for locator('table').first() to be visible" /tmp/tennis-smoke.log; then
+            echo "Not a recognized blank-calendar failure; no automatic code change."
+            exit 0
+          fi
+          if ! grep -q "const NAVIGATION_TIMEOUT_MS = 60000;" src/sites.mjs; then
+            echo "Timeout already changed; avoid repeated repair."
+            exit 0
+          fi
+          branch="auto-repair/bunkyo-calendar-timeout"
+          if gh api "repos/${{ github.repository }}/branches/$branch" >/dev/null 2>&1; then
+            echo "Existing repair branch found; avoid duplicate PR."
+            exit 0
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/sites.mjs')
+          s=p.read_text()
+          old='const NAVIGATION_TIMEOUT_MS = 60000;'
+          assert s.count(old)==1
+          p.write_text(s.replace(old,'const NAVIGATION_TIMEOUT_MS = 90000;'))
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add src/sites.mjs
+          git commit -m "Increase calendar navigation timeout after verified blank-calendar failure"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Auto-repair: increase calendar render timeout to 90s" \
+            --body "Automatically proposed only after a live validation detected the known blank-calendar timeout. This changes only the navigation wait. PR validation runs automatically; review before merging."
       - name: Fail when live smoke fails
         if: steps.smoke.outcome == 'failure'
         run: exit 1
