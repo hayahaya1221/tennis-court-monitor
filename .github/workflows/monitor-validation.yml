@@ -28,7 +28,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,7 +43,7 @@ jobs:
       - name: Read-only live smoke test (LINE disabled)
         id: smoke
         continue-on-error: true
-        timeout-minutes: 20
+        timeout-minutes: 25
         env:
           TARGET_SITES: bunkyo
           STATE_PATH: /tmp/tennis-validation-seen.json
@@ -95,6 +95,14 @@ jobs:
           assert s.count(old)==1
           p.write_text(s.replace(old,'const NAVIGATION_TIMEOUT_MS = 90000;'))
           PY
+          # Validate the proposed repair in this same run. PRs pushed using
+          # GITHUB_TOKEN do not reliably trigger subsequent PR workflows.
+          npm test
+          if ! timeout 1500s env TARGET_SITES=bunkyo STATE_PATH=/tmp/tennis-repair-seen.json BETWEEN_DAY_REQUESTS_MS=1000 npm run check > /tmp/tennis-repair-smoke.log 2>&1; then
+            echo "Repair failed live verification; do not publish an unverified PR." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Known calendar-timeout repair passed live verification." >> "$GITHUB_STEP_SUMMARY"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
