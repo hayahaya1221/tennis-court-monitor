@@ -1,0 +1,72 @@
+name: Tennis monitor validation and recovery
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'package*.json'
+      - '.github/workflows/monitor-validation.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'package*.json'
+      - '.github/workflows/monitor-validation.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: tennis-monitor-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Unit tests
+        run: npm test
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+      - name: Read-only live smoke test (LINE disabled)
+        id: smoke
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          TARGET_SITES: bunkyo
+          STATE_PATH: /tmp/tennis-validation-seen.json
+          BETWEEN_DAY_REQUESTS_MS: '1000'
+        run: npm run check > /tmp/tennis-smoke.log 2>&1
+      - name: Summarize outcome
+        if: always()
+        run: |
+          if [ -f /tmp/tennis-smoke.log ]; then
+            grep -E '"(site|status|daysInspected|matching|new|delivered|reason)"' /tmp/tennis-smoke.log | head -30 >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+      - name: Open or update failure issue (main only)
+        if: steps.smoke.outcome == 'failure' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Tennis monitor: live smoke test failed"
+          existing=$(gh issue list --state open --search "$title in:title" --json number,title --jq '.[] | select(.title=="Tennis monitor: live smoke test failed") | .number' | head -1)
+          body="Read-only smoke test failed. Inspect workflow logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. No LINE message was sent by this validation workflow."
+          if [ -z "$existing" ]; then
+            gh issue create --title "$title" --body "$body"
+          else
+            gh issue comment "$existing" --body "$body"
+          fi
+      - name: Fail when live smoke fails
+        if: steps.smoke.outcome == 'failure'
+        run: exit 1
