@@ -312,7 +312,7 @@ async function displayRange(page,site,startDate){
   await ensureNoChallenge(page);
 }
 
-async function enterCalendar(page,site){
+async function enterCalendarOnce(page,site){
   // Sumida can respond slowly from hosted runners. Wait for the HTTP response
   // first, then for the JavaScript UI to render, rather than demanding the
   // full DOMContentLoaded event within one short navigation timeout.
@@ -334,6 +334,25 @@ async function enterCalendar(page,site){
   }
   await clickButton(page,NEXT_BUTTON);
   await waitCalendar(page);
+}
+
+
+async function enterCalendar(page,site){
+  try {
+    await enterCalendarOnce(page,site);
+  } catch(error) {
+    // Only retry the known incomplete calendar-render case. Do not retry
+    // authentication challenges, unexpected dialogs, or other navigation errors.
+    const message=error instanceof Error?error.message:String(error);
+    const path=new URL(page.url()).pathname;
+    if(!path.endsWith(CALENDAR_PATH) ||
+       !message.includes("locator.waitFor: Timeout") ||
+       !message.includes("locator('table').first()"))throw error;
+    await ensureNoChallenge(page);
+    // Start a fresh facility-selection flow once; do not treat a blank
+    // calendar as zero availability.
+    await enterCalendarOnce(page,site);
+  }
 }
 
 /** If any date fails, throw: incomplete scans must never be treated as "no availability". */
