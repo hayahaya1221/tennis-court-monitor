@@ -7,6 +7,7 @@ const TIME_PATH = '/AvailabilityCheckApplySelectTime';
 const MAX_SELECTED_CELLS = 10;
 const SELECTION_SETTLE_MS = 3000;
 const NAVIGATION_TIMEOUT_MS = 60000;
+const NO_DATE_SELECTED_MESSAGE = '照会または申込をする日を選択してください。';
 
 async function clickButton(page, label) {
   // The booking UI keeps buttons for inactive tabs in the DOM. On the Bunkyo
@@ -24,6 +25,43 @@ async function visibleModalDetails(page){
       message:(el.querySelector('.modal-body')?.textContent??el.textContent??'')
         .trim().slice(0,400)
     }))).catch(()=>[]);
+}
+
+function isNoDateSelectedModal(modals){
+  return modals.length===1 && modals[0].title==='エラー'
+    && modals[0].message===NO_DATE_SELECTED_MESSAGE;
+}
+
+function calendarLabel(page,c){
+  return page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
+    .locator('td').nth(c.cellIndex).locator('label');
+}
+
+async function reselectAfterNoDateError(page,batch,date){
+  // Verified on the public reservation page: this exact validation dialog has
+  // a single "閉じる" button. Never dismiss other/unknown dialogs automatically.
+  const modal=page.locator('[role="dialog"][aria-modal="true"]:visible').first();
+  await modal.locator('button').filter({hasText:'閉じる'}).first().click({timeout:10000});
+  await modal.waitFor({state:'hidden',timeout:10000});
+  await page.locator('body.Loading-indicator').waitFor({state:'hidden',timeout:NAVIGATION_TIMEOUT_MS});
+
+  // The button can be rejected despite active/checked DOM attributes. Generate
+  // fresh UI click events by clearing the batch and choosing it again once.
+  for(const c of batch){
+    const label=calendarLabel(page,c);
+    const classes=(await label.getAttribute('class')??'').split(/\s+/);
+    const checked=await label.locator('input[type="checkbox"]').isChecked();
+    if(classes.includes('active')||checked)await label.click();
+  }
+  await page.waitForTimeout(1000);
+  for(const c of batch)await calendarLabel(page,c).click();
+  await page.waitForTimeout(SELECTION_SETTLE_MS);
+  const ready=await page.evaluate(items=>items.every(c=>{
+    const row=document.querySelectorAll('table')[c.tableIndex]?.querySelectorAll('tr')[c.rowIndex];
+    const label=row?.querySelectorAll('td')[c.cellIndex]?.querySelector('label');
+    return !!label?.classList.contains('active') && !!label.querySelector('input[type="checkbox"]')?.checked;
+  }),batch);
+  if(!ready)throw new Error(`エラー後の再選択が確定していません: ${date} (${batch.length}件)`);
 }
 
 async function onPath(page, path) {
@@ -184,11 +222,7 @@ async function selectAndInspectDate(page,site,candidates,date,delayMs){
   // Keep the working, date-based selection flow, splitting only when needed.
   for(let offset=0;offset<selected.length;offset+=MAX_SELECTED_CELLS){
     const batch=selected.slice(offset,offset+MAX_SELECTED_CELLS);
-    for(const c of batch){
-      const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
-        .locator('td').nth(c.cellIndex).locator('label');
-      await label.click();
-    }
+    for(const c of batch)await calendarLabel(page,c).click();
     // Date selection is reflected in the DOM immediately, but the site's
     // navigation handler can still be processing it. Allow it to settle.
     await page.waitForTimeout(SELECTION_SETTLE_MS);
@@ -207,19 +241,19 @@ async function selectAndInspectDate(page,site,candidates,date,delayMs){
     }catch(error){
       const currentPath=new URL(page.url()).pathname;
       if(currentPath.endsWith(CALENDAR_PATH)){
-        // Validation dialogs block the underlying Next button. Retrying a
-        // covered button only produces a click timeout, hiding the real cause.
-        const modals=await visibleModalDetails(page);
-        if(modals.length){
+        // A known transient validation error means the server did not see the
+        // chosen day, even if the DOM reports it checked. Close, reselect and
+        // retry exactly once. Unknown dialogs are never dismissed.
+        let modals=await visibleModalDetails(page);
+        if(!modals.length){
+          // Preserve the longer wait for genuinely slow navigations.
+          await page.waitForTimeout(3000);
+          modals=await visibleModalDetails(page);
+        }
+        if(modals.length && !isNoDateSelectedModal(modals)){
           throw new Error(`予約サイトが画面遷移を中断するダイアログを表示: ${date} (${batch.length}件), ${JSON.stringify(modals)}`);
         }
-        // Retry only if the same date-selection page still remains after a
-        // full 60-second wait. Never duplicate a completed navigation.
-        await page.waitForTimeout(3000);
-        const beforeRetryModals=await visibleModalDetails(page);
-        if(beforeRetryModals.length){
-          throw new Error(`再試行前にダイアログが表示されました: ${date}, ${JSON.stringify(beforeRetryModals)}`);
-        }
+        if(modals.length)await reselectAfterNoDateError(page,batch,date);
         try{
           await clickButton(page,NEXT_BUTTON);
         }catch(clickError){
@@ -240,7 +274,7 @@ async function selectAndInspectDate(page,site,candidates,date,delayMs){
               .slice(0,3).map(el=>el.textContent.trim().slice(0,150))
           })).catch(()=>({path:new URL(page.url()).pathname,diagnosticsUnavailable:true}));
           const retryModals=await visibleModalDetails(page);
-          throw new Error(`時間帯画面への遷移に失敗: ${date} (${batch.length}件), 60秒待機後に1回再試行済み, 状態=${JSON.stringify(diagnostic)}, modal=${JSON.stringify(retryModals)}, 原因=${retryError.message}`);
+          throw new Error(`時間帯画面への遷移に失敗: ${date} (${batch.length}件), 1回再試行済み (日付未選択エラー時は選択し直し), 状態=${JSON.stringify(diagnostic)}, modal=${JSON.stringify(retryModals)}, 原因=${retryError.message}`);
         }
       }else if(!currentPath.endsWith(TIME_PATH)){
         throw new Error(`想定外の画面へ遷移しました: ${date}, 現在 ${currentPath}`);
@@ -251,8 +285,7 @@ async function selectAndInspectDate(page,site,candidates,date,delayMs){
     await waitCalendar(page);
     // Preserve the successful version's deselection behavior after returning.
     for(const c of batch){
-      const label=page.locator('table').nth(c.tableIndex).locator('tr').nth(c.rowIndex)
-        .locator('td').nth(c.cellIndex).locator('label');
+      const label=calendarLabel(page,c);
       const active=await label.getAttribute('class');
       if((active??'').split(/\s+/).includes('active'))await label.click();
     }
