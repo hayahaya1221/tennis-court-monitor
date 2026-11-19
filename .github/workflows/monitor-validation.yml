@@ -2,6 +2,9 @@ name: Tennis monitor validation and recovery
 
 on:
   workflow_dispatch:
+  schedule:
+    # Daily 03:17 JST; independent of the production availability schedule.
+    - cron: '17 18 * * *'
   push:
     branches: [main]
     paths:
