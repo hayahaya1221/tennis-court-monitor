@@ -3,11 +3,10 @@
   "sites": {
     "bunkyo": {
       "seen": [
-        "bunkyo|2026-12-25|18-21|第１コート",
         "bunkyo|2027-01-10|18-21|第１コート"
       ],
       "lastErrorDay": "2026-11-26",
-      "lastSuccess": "2026-11-25 22:29:50 JST",
+      "lastSuccess": "2026-11-26 01:22:32 JST",
       "daysInspected": 39
     },
     "sumida": {
